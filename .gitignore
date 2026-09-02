@@ -1,0 +1,36 @@
+# secrets
+.env
+.env.*
+*.pem
+*.key
+
+# databases
+*.db
+*.db-shm
+*.db-wal
+*.sqlite*
+
+# python
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# backup copies
+*.bak
+*.bak[0-9]*
+*.bak_*
+*.bak-*
+*.bak.*
+*.backup*
+*.pre-*
+*.pre_*
+*.orig
+*.old
+*~
+
+# logs
+*.log
+logs/
+.venv
+app/.venv
