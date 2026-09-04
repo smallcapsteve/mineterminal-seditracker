@@ -80,6 +80,53 @@ body > .container, body > main, body > .wrap, body > #root, body > #app {
 </style>
 
 
+<style id="sedi-sort-v1">
+/* SEDI_SORT_V1_BEGIN (2026-09-04) — clickable column sorting, checklist D20.
+   Sorting is server-side: each header is a link carrying ?sort=&dir=, so the
+   ordering spans the whole result set rather than only the rows on screen, and
+   a sorted view survives being bookmarked, shared or reloaded. */
+
+.fin-table th.sortable { padding: 0; }
+
+.fin-table th.sortable > a {
+  display: flex;
+  align-items: center;
+  gap: 0.3em;
+  padding: 0.6rem 0.7rem;
+  color: inherit;
+  text-decoration: none;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.fin-table th.sortable.num > a { justify-content: flex-end; }
+
+.fin-table th.sortable > a:hover,
+.fin-table th.sortable > a:focus-visible { text-decoration: underline; }
+.fin-table th.sortable > a:focus-visible { outline: 2px solid #fff; outline-offset: -2px; }
+
+/* The indicator is generated from aria-sort, so the arrow and the announced
+   state can never disagree. */
+.fin-table th.sortable .sort-ind::after {
+  content: "\2195";            /* up-down arrow: this column can be sorted */
+  opacity: 0.35;
+  font-size: 0.85em;
+}
+.fin-table th.sortable[aria-sort="ascending"]  .sort-ind::after { content: "\25B2"; opacity: 1; }
+.fin-table th.sortable[aria-sort="descending"] .sort-ind::after { content: "\25BC"; opacity: 1; }
+
+/* The active column is marked by more than the arrow alone, so it stays legible
+   in greyscale and for anyone who does not register a small glyph. */
+.fin-table th.sortable.sorted > a { font-weight: 800; text-decoration: underline; }
+.fin-table tbody td.sorted-col { background: #fbfbf7; }
+
+@media (hover: none) {
+  /* Touch: no hover to reveal affordance, so keep the arrows fully visible. */
+  .fin-table th.sortable .sort-ind::after { opacity: 0.6; }
+}
+/* SEDI_SORT_V1_END */
+</style>
+
+
 <style id="sedi-logo-restyle-v1">
 /* SEDI_LOGO_RESTYLE_V1_BEGIN */
 .brand-wordmark{

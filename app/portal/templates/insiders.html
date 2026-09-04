@@ -2,7 +2,7 @@
 {% block title %}Insiders — SEDITracker{% endblock %}
 {% block content %}
   <h2 class="page-title">Insiders</h2>
-  <p class="muted">Top {{ rows|length }} insiders by recent activity</p>
+  <p class="muted">Top {{ shown }} of {{ total_insiders }} insiders, ranked by {{ sort_label }} ({{ "high to low" if dir == "desc" else "low to high" }}) &middot; ranking is across all {{ total_insiders }}</p>
 
   {% if not rows %}
     <p class="empty">No insiders ingested yet.</p>
@@ -11,10 +11,12 @@
       <table class="fin-table">
         <thead>
           <tr>
-            <th>Insider</th>
-            <th class="num">Transactions</th>
-            <th class="num">Tickers</th>
-            <th>Last trade</th>
+            {% for c in columns %}
+              <th class="sortable{{ ' num' if c.num }}{{ ' sorted' if c.key == sort }}"
+                  aria-sort="{% if c.key == sort %}{{ 'descending' if dir == 'desc' else 'ascending' }}{% else %}none{% endif %}">
+                <a href="{{ c.href }}" title="Sort by {{ c.label }}">{{ c.label }}<span class="sort-ind" aria-hidden="true"></span></a>
+              </th>
+            {% endfor %}
           </tr>
         </thead>
         <tbody>

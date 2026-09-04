@@ -16,6 +16,7 @@ import re
 import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
+from urllib.parse import urlencode
 
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -144,6 +145,128 @@ def _display_company_name(raw_name: str | None, ticker: str) -> str:
 
 
 
+# ===================== Column sorting (D20) ==================================
+# /* ST_SORT_V1 (2026-09-04) */
+# Sorting happens in Python, after the rows are fetched and decorated, for three
+# reasons: `company_name` is computed here from tickers.json and does not exist as
+# a SQL column at all; no user input ever reaches a query, so there is no injection
+# surface (cf. B25); and one code path serves all three pages. Row counts are small
+# (1.4k / 1.0k / 6.5k) so the sort itself costs well under a millisecond.
+#
+# The sort spans the WHOLE result set for the page, not just the rows displayed —
+# "top by Value" means the largest in the window, not the largest of an arbitrary
+# first slice. That was the explicit requirement.
+
+# key -> (row field, kind). kind drives both the comparison and the default direction.
+SORT_SPECS = {
+    "home": {
+        "default": ("date", "desc"),
+        "cols": [
+            ("date",    "Date",    "txn_date",     "date", False),
+            ("ticker",  "Ticker",  "ticker",       "text", False),
+            ("company", "Company", "company_name", "text", False),
+            ("insider", "Insider", "name",         "text", False),
+            ("type",    "Type",    "txn_type",     "text", False),
+            ("shares",  "Shares",  "shares",       "num",  True),
+            ("price",   "Price",   "price",        "num",  True),
+            ("value",   "Value",   "total_value",  "num",  True),
+        ],
+    },
+    "tickers": {
+        "default": ("last", "desc"),
+        "cols": [
+            ("ticker",  "Ticker",       "ticker",       "text", False),
+            ("company", "Company",      "company_name", "text", False),
+            ("txns",    "Transactions", "n",            "num",  True),
+            ("first",   "First trade",  "first_d",      "date", False),
+            ("last",    "Last trade",   "last_d",       "date", False),
+        ],
+    },
+    "insiders": {
+        "default": ("last", "desc"),
+        "cols": [
+            ("insider", "Insider",      "name",      "text", False),
+            ("txns",    "Transactions", "n",         "num",  True),
+            ("tickers", "Tickers",      "n_tickers", "num",  True),
+            ("last",    "Last trade",   "last_d",    "date", False),
+        ],
+    },
+}
+
+# Text that renders as "no value". These sort last in BOTH directions — a blank is
+# not smaller than every number, it is absent, and flipping the direction should not
+# march a block of em-dashes to the top of the page.
+_EMPTY_TEXT = ("", "-", "\u2014")
+
+
+def _is_missing(v, kind: str) -> bool:
+    if v is None:
+        return True
+    if kind == "num":
+        return False
+    return str(v).strip() in _EMPTY_TEXT
+
+
+def _sort_rows(rows: list, page: str, sort: str, direction: str):
+    """Sort `rows` in place-ish and return (rows, sort, direction).
+
+    Unknown or malformed parameters fall back to the page default rather than
+    erroring — these values arrive from the query string.
+    """
+    spec = SORT_SPECS[page]
+    by_key = {c[0]: c for c in spec["cols"]}
+    if sort not in by_key:
+        sort, direction = spec["default"]
+    if direction not in ("asc", "desc"):
+        direction = spec["default"][1]
+
+    _, _, field, kind, _ = by_key[sort]
+    rev = direction == "desc"
+
+    present, missing = [], []
+    for r in rows:
+        (missing if _is_missing(r.get(field), kind) else present).append(r)
+
+    if kind == "num":
+        present.sort(key=lambda r: float(r[field]), reverse=rev)
+    else:
+        # Dates are stored as YYYY-MM-DD, so lexical order is chronological order.
+        present.sort(key=lambda r: str(r[field]).casefold(), reverse=rev)
+
+    # Python's sort is stable, so the SQL ORDER BY survives as the tiebreak:
+    # sorting by ticker still leaves each ticker's own rows newest-first.
+    return present + missing, sort, direction
+
+
+def _sort_ctx(page: str, sort: str, direction: str, base_params: dict | None = None):
+    """Build the header model the templates render: label, alignment, link, state."""
+    spec = SORT_SPECS[page]
+    by_key = {c[0]: c for c in spec["cols"]}
+    if sort not in by_key:
+        sort, direction = spec["default"]
+    if direction not in ("asc", "desc"):
+        direction = spec["default"][1]
+
+    columns = []
+    for key, label, _field, kind, is_num in spec["cols"]:
+        if key == sort:
+            # Clicking the active column flips it.
+            nxt = "asc" if direction == "desc" else "desc"
+            state = direction
+        else:
+            # First click: numbers and dates go biggest/newest first, text goes A-Z.
+            nxt = "asc" if kind == "text" else "desc"
+            state = None
+        params = dict(base_params or {})
+        params.update({"sort": key, "dir": nxt})
+        columns.append({
+            "key": key, "label": label, "num": is_num,
+            "href": "?" + urlencode(params), "state": state,
+        })
+    return {"columns": columns, "sort": sort, "dir": direction,
+            "sort_label": by_key[sort][1]}
+
+
 def _ctx(request: Request, page: str, **kwargs):
     base = {
         "request": request,
@@ -158,15 +281,19 @@ def _ctx(request: Request, page: str, **kwargs):
 # ---------- routes ----------
 
 @app.get("/", response_class=HTMLResponse)
-def home(request: Request, days: int = 60):
+def home(request: Request, days: int = 60, sort: str = "", dir: str = ""):
     con = get_conn()
+    days = max(1, min(days, 365 * 5))
     cutoff = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%d")
+    # ST_SORT_V1: cap raised 200 -> 5000 so the sort spans the whole 60-day window
+    # rather than an arbitrary first 200 of it (1,378 rows in the window as of
+    # 2026-09-04). The cap stays as a guard against an unbounded ?days=.
     rows = con.execute(
         "SELECT t.ticker, t.txn_date, i.name, t.txn_type, t.shares, t.price, "
         "       t.total_value, t.notes "
         "FROM transactions t LEFT JOIN insiders i ON i.insider_id = t.insider_id "
         "WHERE t.txn_date >= ? "
-        "ORDER BY t.txn_date DESC, t.txn_id DESC LIMIT 200",
+        "ORDER BY t.txn_date DESC, t.txn_id DESC LIMIT 5000",
         (cutoff,),
     ).fetchall()
 
@@ -182,11 +309,14 @@ def home(request: Request, days: int = 60):
         "SELECT COUNT(DISTINCT ticker) FROM transactions"
     ).fetchone()[0]
 
+    decorated, sort, direction = _sort_rows(decorated, "home", sort, dir)
+    sctx = _sort_ctx("home", sort, direction, {"days": days} if days != 60 else {})
+
     return templates.TemplateResponse(
         request, "home.html",
         _ctx(request, "home",
              rows=decorated, days=days,
-             total_txns=total_txns, total_tickers=total_tickers),
+             total_txns=total_txns, total_tickers=total_tickers, **sctx),
     )
 
 
@@ -289,7 +419,7 @@ def search(request: Request, q: str = ""):
 
 
 @app.get("/tickers", response_class=HTMLResponse)
-def tickers_page(request: Request):
+def tickers_page(request: Request, sort: str = "", dir: str = ""):
     con = get_conn()
     rows = con.execute(
         "SELECT ticker, COUNT(*) as n, MIN(txn_date) as first_d, MAX(txn_date) as last_d "
@@ -299,28 +429,42 @@ def tickers_page(request: Request):
     for r in rows:
         r["company_name"] = _display_company_name(_ticker_to_name(r["ticker"]), r["ticker"])
         r["name"] = _smart_case(r["name"]) if r.get("name") else r.get("name")
+    rows, sort, direction = _sort_rows(rows, "tickers", sort, dir)
+    sctx = _sort_ctx("tickers", sort, direction)
     return templates.TemplateResponse(
         request, "tickers.html",
-        _ctx(request, "tickers", rows=rows),
+        _ctx(request, "tickers", rows=rows, **sctx),
     )
 
 
+INSIDERS_SHOWN = 500
+
+
 @app.get("/insiders", response_class=HTMLResponse)
-def insiders_page(request: Request):
+def insiders_page(request: Request, sort: str = "", dir: str = ""):
     con = get_conn()
+    # ST_SORT_V1: the LIMIT moved out of SQL so the sort ranks all ~6,500 insiders
+    # and the page then shows the top slice of THAT ranking. Sorting a fixed 500
+    # picked by recency would have reordered an arbitrary subset while looking
+    # authoritative — the exact failure mode D20 was originally about.
     rows = con.execute(
         "SELECT i.insider_id, i.name, COUNT(t.txn_id) as n, "
         "       COUNT(DISTINCT t.ticker) as n_tickers, "
         "       MAX(t.txn_date) as last_d "
         "FROM insiders i JOIN transactions t ON t.insider_id = i.insider_id "
-        "GROUP BY i.insider_id ORDER BY MAX(t.txn_date) DESC LIMIT 500"
+        "GROUP BY i.insider_id ORDER BY MAX(t.txn_date) DESC"
     ).fetchall()
     rows = [dict(r) for r in rows]
     for r in rows:
         r["slug"] = _insider_slug(r["name"])
+    total_insiders = len(rows)
+    rows, sort, direction = _sort_rows(rows, "insiders", sort, dir)
+    rows = rows[:INSIDERS_SHOWN]
+    sctx = _sort_ctx("insiders", sort, direction)
     return templates.TemplateResponse(
         request, "insiders.html",
-        _ctx(request, "insiders", rows=rows),
+        _ctx(request, "insiders", rows=rows,
+             total_insiders=total_insiders, shown=len(rows), **sctx),
     )
 
 

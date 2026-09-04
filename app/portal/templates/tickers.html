@@ -11,11 +11,12 @@
       <table class="fin-table">
         <thead>
           <tr>
-            <th>Ticker</th>
-            <th>Company</th>
-            <th class="num">Transactions</th>
-            <th>First trade</th>
-            <th>Last trade</th>
+            {% for c in columns %}
+              <th class="sortable{{ ' num' if c.num }}{{ ' sorted' if c.key == sort }}"
+                  aria-sort="{% if c.key == sort %}{{ 'descending' if dir == 'desc' else 'ascending' }}{% else %}none{% endif %}">
+                <a href="{{ c.href }}" title="Sort by {{ c.label }}">{{ c.label }}<span class="sort-ind" aria-hidden="true"></span></a>
+              </th>
+            {% endfor %}
           </tr>
         </thead>
         <tbody>
