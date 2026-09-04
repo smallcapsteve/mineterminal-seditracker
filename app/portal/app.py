@@ -200,10 +200,28 @@ _EMPTY_TEXT = ("", "-", "\u2014")
 
 
 def _is_missing(v, kind: str) -> bool:
+    """Does this value render as "no value" on the page?
+
+    The sort must order WHAT THE READER SEES. The templates print a numeric cell
+    with `{{ "..."|format(x) if x else "—" }}`, so a **zero** shows as an em-dash,
+    exactly like a blank. If the sort disagreed and treated zero as the number 0,
+    a solid block of em-dashes would land in the middle of a descending sort,
+    right at the zero boundary between positive and negative values — which looks
+    precisely like the sort is broken.
+
+    This is not hypothetical: as of 2026-09-04 the table holds **no NULLs at all**
+    in `shares`, `price` or `total_value` — 25,013 rows carry price 0 / value 0
+    (option grants and other no-cash-consideration filings). Every em-dash on the
+    site is a zero.
+
+    So: mirror the template's own truth test. If the display is ever changed to
+    print "$0" instead of an em-dash, this test has to change with it or the two
+    will drift apart again.
+    """
     if v is None:
         return True
     if kind == "num":
-        return False
+        return not v          # 0 and 0.0 render as "—", so they sort as absent
     return str(v).strip() in _EMPTY_TEXT
 
 
