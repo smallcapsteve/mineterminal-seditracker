@@ -11,6 +11,7 @@ Routes:
 """
 from __future__ import annotations
 import json
+import os
 import re
 import sqlite3
 from datetime import datetime, timedelta
@@ -40,14 +41,34 @@ def get_conn():
     return con
 
 
-def _ticker_to_name(ticker: str) -> str | None:
+# PERF_A14 (2026-09-04): this re-opened and re-parsed the 258 KB tickers.json
+# once per result row. On /tickers (1,035 rows) that was ~4.0s of the page's
+# ~4.0s of server time. Parsed once now; re-read only when the file changes.
+_TICKER_NAMES: dict = {}
+_TICKER_NAMES_MTIME: float = -1.0
+
+
+def _load_ticker_names() -> dict:
+    global _TICKER_NAMES, _TICKER_NAMES_MTIME
     try:
-        for r in json.load(open(TICKERS_PATH)):
-            if isinstance(r, dict) and r.get("ticker") == ticker:
-                return r.get("name")
-    except Exception:
-        pass
-    return None
+        m = os.path.getmtime(TICKERS_PATH)
+    except OSError:
+        return _TICKER_NAMES
+    if m != _TICKER_NAMES_MTIME:
+        try:
+            names: dict = {}
+            for r in json.load(open(TICKERS_PATH)):
+                if isinstance(r, dict) and r.get("ticker"):
+                    names.setdefault(r["ticker"], r.get("name"))
+            _TICKER_NAMES = names
+            _TICKER_NAMES_MTIME = m
+        except Exception:
+            pass
+    return _TICKER_NAMES
+
+
+def _ticker_to_name(ticker: str) -> str | None:
+    return _load_ticker_names().get(ticker)
 
 
 def _slugify(s: str) -> str:
