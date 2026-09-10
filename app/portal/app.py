@@ -28,7 +28,13 @@ TICKERS_PATH = "/opt/sedi/app/tickers.json"
 TEMPLATES_DIR = "/opt/sedi/app/portal/templates"
 STATIC_DIR = "/opt/sedi/app/portal/static"
 
-app = FastAPI(title="SEDITracker")
+app = FastAPI(
+    title="SEDITracker",
+    # B32 (2026-09-07): interactive API docs off in production.
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 templates = Jinja2Templates(directory=TEMPLATES_DIR)
 
