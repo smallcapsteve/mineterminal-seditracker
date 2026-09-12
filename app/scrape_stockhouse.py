@@ -53,7 +53,6 @@ import sys
 import time
 import urllib.parse
 from datetime import datetime
-from pathlib import Path
 
 DB_PATH      = "/opt/sedi/app/portal/sedi.db"
 TICKERS_PATH = "/opt/sedi/app/tickers.json"

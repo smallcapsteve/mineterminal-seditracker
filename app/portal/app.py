@@ -15,11 +15,10 @@ import os
 import re
 import sqlite3
 from datetime import datetime, timedelta
-from pathlib import Path
 from urllib.parse import urlencode
 
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -425,6 +424,7 @@ def search(request: Request, q: str = ""):
         ).fetchall()]
         for r in insider_hits:
             r["slug"] = _insider_slug(r["name"])
+            r["name"] = _smart_case(r["name"]) if r.get("name") else r.get("name")
 
         ticker_hits = [dict(r) for r in con.execute(
             "SELECT ticker, COUNT(*) n FROM transactions "
@@ -433,7 +433,6 @@ def search(request: Request, q: str = ""):
         ).fetchall()]
         for r in ticker_hits:
             r["company_name"] = _display_company_name(_ticker_to_name(r["ticker"]), r["ticker"])
-        r["name"] = _smart_case(r["name"]) if r.get("name") else r.get("name")
 
     return templates.TemplateResponse(
         request, "search.html",
@@ -452,7 +451,6 @@ def tickers_page(request: Request, sort: str = "", dir: str = ""):
     rows = [dict(r) for r in rows]
     for r in rows:
         r["company_name"] = _display_company_name(_ticker_to_name(r["ticker"]), r["ticker"])
-        r["name"] = _smart_case(r["name"]) if r.get("name") else r.get("name")
     rows, sort, direction = _sort_rows(rows, "tickers", sort, dir)
     sctx = _sort_ctx("tickers", sort, direction)
     return templates.TemplateResponse(
@@ -502,7 +500,6 @@ def healthz():
 
 # ===================== JSON API for MTP integration ============================
 # /* ST_JSON_API_V1 */
-from fastapi.responses import JSONResponse  # noqa: E402
 
 def _row_to_mtp(r):
     """Map ST transactions row -> MTP D.insider_filings schema."""
