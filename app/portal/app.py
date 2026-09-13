@@ -3,7 +3,8 @@
 Reads from /opt/sedi/app/portal/sedi.db. Templates inherit MNT's base.html
 (red ribbon, same look-and-feel) so MNT and SEDITracker share visual identity.
 
-Company names come from the shared universe (MinePortal), not from a file.
+Company names and membership come from the shared universe (MinePortal).
+
 Until 2026-09-13 this read /opt/sedi/app/tickers.json, which was a symlink into
 MNT's watchlist — so SediTracker's idea of who a ticker belonged to was a
 by-product of MNT's news scrapers. Those scrapers name a company from the
@@ -11,9 +12,23 @@ press-release headline, which is why this file used to carry helpers for
 hiding names like 'Pml' and stripping 'May 7, 2026 / ' prefixes. The universe
 is curated, so those helpers are gone rather than being carried forward.
 
+ST_UNIVERSE_FILTER_V1 (2026-09-13, same day, second pass): the company-oriented
+listings show universe companies only. The transactions table reaches back
+further than the universe does and holds filings for 114 tickers that have since
+left it — delisted issuers, and companies screened out as not-mining (a bank, a
+pizza royalty, several medical-device makers). Their history is real and is kept
+in the database and reachable at /ticker/<symbol>, but it is not browsable, on
+Justin's call: the alternative was 114 rows reading as an em-dash where a company
+name should be.
+
+Insider pages are deliberately NOT filtered — an insider's record is about the
+person, and dropping some of their trades would make the totals on /insiders
+disagree with the trades listed on their own page. There, a ticker with no
+universe entry falls back to showing the ticker itself rather than an em-dash.
+
 Routes:
-  /                  Recent insider activity firehose (last 60 days, all tickers)
-  /ticker/{ticker}   Per-ticker insider history
+  /                  Recent insider activity firehose (last 60 days)
+  /ticker/{ticker}   Per-ticker insider history — works for any ticker on file
   /insider/{slug}    All trades by one insider across all tickers
   /search            Free-text search across insider names + tickers
 """
@@ -66,6 +81,17 @@ def _ticker_to_name(ticker: str) -> str | None:
     return universe_client.name_for(ticker)
 
 
+def _in_universe(ticker: str) -> bool:
+    """ST_UNIVERSE_FILTER_V1. Fails OPEN — if the universe cannot be loaded at
+    all, every ticker passes. The same rule as MNT's gate, for the same reason:
+    an empty universe would otherwise empty the site, and a page briefly showing
+    a company that has left the list is a far cheaper wrong answer than a page
+    showing nothing."""
+    if not universe_client.load():
+        return True
+    return universe_client.name_for(ticker) is not None
+
+
 def _slugify(s: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", (s or "").lower()).strip("-") or "x"
 
@@ -111,15 +137,15 @@ def _smart_case_company(s: str) -> str:
 def _display_company_name(raw_name: str | None, ticker: str) -> str:
     """Final name shown to users.
 
-    A ticker with no universe entry renders as an em-dash. That is deliberate:
-    SediTracker's transactions table reaches back further than the universe
-    does, and a company that has left the universe (delisted, or screened out
-    as not-mining) keeps its filing history on the site without SediTracker
-    inventing a name for it.
+    ST_UNIVERSE_FILTER_V1: a ticker with no universe entry falls back to the
+    ticker itself rather than an em-dash. The company-oriented listings filter
+    those rows out entirely, so this only fires on insider pages, where an
+    em-dash in the Company column reads as missing data when in fact we simply
+    no longer carry that company.
     """
     nm = (raw_name or '').strip()
     if not nm:
-        return '—'
+        return (ticker or '').split('.')[0].upper() or '—'
     return _smart_case_company(nm)
 
 
@@ -274,6 +300,24 @@ def _ctx(request: Request, page: str, **kwargs):
     return base
 
 
+def _covered_totals(con) -> tuple[int, int]:
+    """(transactions, tickers) counting only universe companies.
+
+    Computed rather than taken from COUNT(*), because the headline figures must
+    describe the rows the page will actually show. A total of 80,852 above a list
+    filtered to 959 tickers would be the same class of mismatch as MTP's banner
+    claiming 1,043 over a 1,059-row table.
+    """
+    txns = tickers = 0
+    for ticker, n in con.execute(
+        "SELECT ticker, COUNT(*) FROM transactions GROUP BY ticker"
+    ):
+        if _in_universe(ticker):
+            tickers += 1
+            txns += n
+    return txns, tickers
+
+
 # ---------- routes ----------
 
 @app.get("/", response_class=HTMLResponse)
@@ -296,14 +340,13 @@ def home(request: Request, days: int = 60, sort: str = "", dir: str = ""):
     decorated = []
     for r in rows:
         d = dict(r)
+        if not _in_universe(d["ticker"]):        # ST_UNIVERSE_FILTER_V1
+            continue
         d["company_name"] = _display_company_name(_ticker_to_name(d["ticker"]), d["ticker"])
         d["insider_slug"] = _insider_slug(d["name"]) if d["name"] else ""
         decorated.append(d)
 
-    total_txns = con.execute("SELECT COUNT(*) FROM transactions").fetchone()[0]
-    total_tickers = con.execute(
-        "SELECT COUNT(DISTINCT ticker) FROM transactions"
-    ).fetchone()[0]
+    total_txns, total_tickers = _covered_totals(con)
 
     decorated, sort, direction = _sort_rows(decorated, "home", sort, dir)
     sctx = _sort_ctx("home", sort, direction, {"days": days} if days != 60 else {})
@@ -318,6 +361,9 @@ def home(request: Request, days: int = 60, sort: str = "", dir: str = ""):
 
 @app.get("/ticker/{ticker}", response_class=HTMLResponse)
 def ticker_page(request: Request, ticker: str):
+    """Deliberately NOT filtered. A company that has left the universe keeps its
+    filing history at a stable URL — it is simply no longer browsable from the
+    ticker list."""
     ticker = ticker.upper()
     con = get_conn()
     rows = con.execute(
@@ -350,6 +396,9 @@ def ticker_page(request: Request, ticker: str):
 
 @app.get("/insider/{slug}", response_class=HTMLResponse)
 def insider_page(request: Request, slug: str):
+    """Deliberately NOT filtered — an insider's record is about the person, and
+    hiding some of their trades would make this page disagree with the counts on
+    /insiders. Tickers outside the universe show the ticker as the company."""
     con = get_conn()
     matches = con.execute(
         "SELECT insider_id, name FROM insiders "
@@ -399,13 +448,21 @@ def search(request: Request, q: str = ""):
             r["slug"] = _insider_slug(r["name"])
             r["name"] = _smart_case(r["name"]) if r.get("name") else r.get("name")
 
-        ticker_hits = [dict(r) for r in con.execute(
+        # ST_UNIVERSE_FILTER_V1: filter before the LIMIT, or a search whose top
+        # matches are all out-of-universe would return nothing while claiming to
+        # have looked.
+        raw_hits = [dict(r) for r in con.execute(
             "SELECT ticker, COUNT(*) n FROM transactions "
-            "WHERE ticker LIKE ? GROUP BY ticker ORDER BY n DESC LIMIT 10",
+            "WHERE ticker LIKE ? GROUP BY ticker ORDER BY n DESC LIMIT 60",
             (f"%{q.upper()}%",),
         ).fetchall()]
-        for r in ticker_hits:
+        for r in raw_hits:
+            if not _in_universe(r["ticker"]):
+                continue
             r["company_name"] = _display_company_name(_ticker_to_name(r["ticker"]), r["ticker"])
+            ticker_hits.append(r)
+            if len(ticker_hits) >= 10:
+                break
 
     return templates.TemplateResponse(
         request, "search.html",
@@ -421,10 +478,14 @@ def tickers_page(request: Request, sort: str = "", dir: str = ""):
         "SELECT ticker, COUNT(*) as n, MIN(txn_date) as first_d, MAX(txn_date) as last_d "
         "FROM transactions GROUP BY ticker ORDER BY MAX(txn_date) DESC"
     ).fetchall()
-    rows = [dict(r) for r in rows]
+    out = []
     for r in rows:
+        r = dict(r)
+        if not _in_universe(r["ticker"]):        # ST_UNIVERSE_FILTER_V1
+            continue
         r["company_name"] = _display_company_name(_ticker_to_name(r["ticker"]), r["ticker"])
-    rows, sort, direction = _sort_rows(rows, "tickers", sort, dir)
+        out.append(r)
+    rows, sort, direction = _sort_rows(out, "tickers", sort, dir)
     sctx = _sort_ctx("tickers", sort, direction)
     return templates.TemplateResponse(
         request, "tickers.html",
@@ -468,12 +529,18 @@ def healthz():
     con = get_conn()
     n_txn = con.execute("SELECT COUNT(*) FROM transactions").fetchone()[0]
     n_tkr = con.execute("SELECT COUNT(DISTINCT ticker) FROM transactions").fetchone()[0]
+    cov_txn, cov_tkr = _covered_totals(con)
     # UNIVERSE_CLIENT_V1: surfaced here so a silent fallback to a stale cache is
-    # visible to monitoring rather than only to the log.
+    # visible to monitoring rather than only to the log. Both the shown and the
+    # stored figures are reported, because the gap between them IS the answer to
+    # "why do the three sites show different numbers".
     return {
         "ok": True,
         "transactions": n_txn,
         "tickers_covered": n_tkr,
+        "transactions_shown": cov_txn,
+        "tickers_shown": cov_tkr,
+        "tickers_outside_universe": n_tkr - cov_tkr,
         "universe_companies": len(universe_client.load()),
         "universe_stale": universe_client.is_stale(),
     }
@@ -481,6 +548,9 @@ def healthz():
 
 # ===================== JSON API for MTP integration ============================
 # /* ST_JSON_API_V1 */
+# Deliberately NOT universe-filtered. MTP asks this API for a specific ticker's
+# filings and does its own filtering against the same universe, so filtering here
+# too would only hide history from a caller that already knows what it wants.
 
 def _row_to_mtp(r):
     """Map ST transactions row -> MTP D.insider_filings schema."""
