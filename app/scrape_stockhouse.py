@@ -21,6 +21,15 @@ Stockhouse symbol prefixes:
   CSE        AUOZ.CN  → C.AUOZ
   Other      <skip>
 
+--- UNIVERSE_CLIENT_V1, 2026-09-13 -------------------------------------------
+The ticker list comes from the shared universe (MinePortal) instead of
+/opt/sedi/app/tickers.json, which was a symlink into MNT's news watchlist. That
+file decided what SediTracker scraped as a side effect of what MNT's wire
+scrapers had happened to see, and it carried roughly a hundred tickers that are
+not mining companies at all — a bank, a pizza royalty fund, several medical
+device makers — each of them costing a share of Stockhouse's 50-request session
+budget on every run.
+
 --- G4, 2026-09-08 -----------------------------------------------------------
 Stockhouse serves exactly **50 requests per session** and then returns
 HTTP 403 'Forbidden' for everything after. A freshly bootstrapped session works
@@ -54,8 +63,10 @@ import time
 import urllib.parse
 from datetime import datetime
 
+sys.path.insert(0, "/opt/sedi/app")
+import universe_client
+
 DB_PATH      = "/opt/sedi/app/portal/sedi.db"
-TICKERS_PATH = "/opt/sedi/app/tickers.json"
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 14_2) "
       "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15")
 
@@ -354,12 +365,22 @@ def main() -> int:
 
     from playwright.sync_api import sync_playwright
 
-    tickers_data = json.load(open(TICKERS_PATH))
-    all_tickers = [t["ticker"] for t in tickers_data if isinstance(t, dict) and t.get("ticker")]
+    # UNIVERSE_CLIENT_V1: the ticker list is the shared universe.
+    all_tickers = universe_client.symbols()
+    if not all_tickers:
+        # An empty universe with no cache would otherwise look like a clean run
+        # that found nothing — the same class of silent failure as G4's 403s.
+        print("[stockhouse] ABORT: the universe is empty and no cache was "
+              "available. MinePortal unreachable? Nothing scraped.")
+        return 1
+    if universe_client.is_stale():
+        print("[stockhouse] WARNING: universe served from cache — MinePortal was "
+              "unreachable. Ticker list may be a few hours out of date.")
+
     sh_map = {t: stockhouse_symbol(t) for t in all_tickers}
     eligible = [t for t in all_tickers if sh_map[t]]
     unmappable = len(all_tickers) - len(eligible)
-    print(f"[stockhouse] tickers in tickers.json: {len(all_tickers)}, "
+    print(f"[stockhouse] tickers in universe: {len(all_tickers)}, "
           f"stockhouse-mappable: {len(eligible)}, skipped (exchange): {unmappable}")
 
     con = _conn()
