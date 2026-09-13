@@ -3,6 +3,14 @@
 Reads from /opt/sedi/app/portal/sedi.db. Templates inherit MNT's base.html
 (red ribbon, same look-and-feel) so MNT and SEDITracker share visual identity.
 
+Company names come from the shared universe (MinePortal), not from a file.
+Until 2026-09-13 this read /opt/sedi/app/tickers.json, which was a symlink into
+MNT's watchlist — so SediTracker's idea of who a ticker belonged to was a
+by-product of MNT's news scrapers. Those scrapers name a company from the
+press-release headline, which is why this file used to carry helpers for
+hiding names like 'Pml' and stripping 'May 7, 2026 / ' prefixes. The universe
+is curated, so those helpers are gone rather than being carried forward.
+
 Routes:
   /                  Recent insider activity firehose (last 60 days, all tickers)
   /ticker/{ticker}   Per-ticker insider history
@@ -10,10 +18,10 @@ Routes:
   /search            Free-text search across insider names + tickers
 """
 from __future__ import annotations
-import json
 import os
 import re
 import sqlite3
+import sys
 from datetime import datetime, timedelta
 from urllib.parse import urlencode
 
@@ -22,8 +30,10 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+sys.path.insert(0, "/opt/sedi/app")
+import universe_client
+
 DB_PATH = "/opt/sedi/app/portal/sedi.db"
-TICKERS_PATH = "/opt/sedi/app/tickers.json"
 TEMPLATES_DIR = "/opt/sedi/app/portal/templates"
 STATIC_DIR = "/opt/sedi/app/portal/static"
 
@@ -47,34 +57,13 @@ def get_conn():
     return con
 
 
-# PERF_A14 (2026-09-04): this re-opened and re-parsed the 258 KB tickers.json
-# once per result row. On /tickers (1,035 rows) that was ~4.0s of the page's
-# ~4.0s of server time. Parsed once now; re-read only when the file changes.
-_TICKER_NAMES: dict = {}
-_TICKER_NAMES_MTIME: float = -1.0
-
-
-def _load_ticker_names() -> dict:
-    global _TICKER_NAMES, _TICKER_NAMES_MTIME
-    try:
-        m = os.path.getmtime(TICKERS_PATH)
-    except OSError:
-        return _TICKER_NAMES
-    if m != _TICKER_NAMES_MTIME:
-        try:
-            names: dict = {}
-            for r in json.load(open(TICKERS_PATH)):
-                if isinstance(r, dict) and r.get("ticker"):
-                    names.setdefault(r["ticker"], r.get("name"))
-            _TICKER_NAMES = names
-            _TICKER_NAMES_MTIME = m
-        except Exception:
-            pass
-    return _TICKER_NAMES
-
-
+# UNIVERSE_CLIENT_V1 (2026-09-13): replaces the per-row re-read of a 258 KB
+# tickers.json that PERF_A14 fixed by caching. The universe client keeps its
+# own process-level cache with a 6-hour TTL and an on-disk fallback, so the
+# per-row cost here is a dict lookup and the failure mode is a stale name
+# rather than a blank page.
 def _ticker_to_name(ticker: str) -> str | None:
-    return _load_ticker_names().get(ticker)
+    return universe_client.name_for(ticker)
 
 
 def _slugify(s: str) -> str:
@@ -83,21 +72,6 @@ def _slugify(s: str) -> str:
 
 def _insider_slug(name: str) -> str:
     return _slugify(name)[:80]
-
-
-# ST_NAMES_V1: display-quality helpers
-_GARBAGE_NAME_RE = re.compile(r'^[A-Z][a-z]+$')   # e.g. 'Pml', 'Ele', 'Ngex'
-
-def _is_garbage_name(name: str, ticker: str) -> bool:
-    """A name is garbage if it's just the title-cased bare ticker (e.g. PML.V -> 'Pml')."""
-    if not name or not ticker:
-        return False
-    bare = ticker.split('.')[0]
-    if not _GARBAGE_NAME_RE.match(name):
-        return False
-    # Allow names that legitimately look like 'Aris' even if Aris is a ticker — only
-    # mark garbage when the name is exactly the bare ticker title-cased / capitalized.
-    return name.lower() == bare.lower() or name == bare.title() or name == bare.capitalize()
 
 
 def _smart_case(s: str) -> str:
@@ -124,45 +98,44 @@ def _smart_case_company(s: str) -> str:
     the entire string is ALL-CAPS (zero lowercase letters) — preserves stylized
     brand names like 'STLLR Gold', 'POWR Lithium', 'AKITA Drilling', 'KORE Mining'.
 
-    'HEADWATER EXPLORATION INC' -> 'Headwater Exploration Inc'  (entirely caps)
-    'STLLR Gold Inc'            -> 'STLLR Gold Inc'              (has lowercase)
-    'POWR Lithium Corp.'        -> 'POWR Lithium Corp.'          (has lowercase)
-    'ABOUND Energy Inc'         -> 'ABOUND Energy Inc'           (has lowercase)
+    Kept after the universe cutover because MinePortal's own imports include a
+    few all-caps names; it is display polish, not name repair.
     """
     if not s:
         return s
-    # If string contains any lowercase letter, treat it as already mixed-case
     if re.search(r'[a-z]', s):
         return s
-    # All caps: title-case each 2+-char ALL-CAPS token
     return _smart_case(s)
 
 
 def _display_company_name(raw_name: str | None, ticker: str) -> str:
-    """Final name shown to users. Strips press-release date prefixes, hides
-    garbage names like 'Pml', and smart-cases ALL-CAPS company names."""
-    nm = (raw_name or '').strip()
-    # ST_NAMES_V2: Strip leading "Month dd, yyyy / " or similar press-release prefixes
-    nm = re.sub(r'^(?:[A-Z][a-z]+\s+\d{1,2},?\s+\d{4}\s*/\s*)', '', nm)
-    if not nm or _is_garbage_name(nm, ticker):
-        return '—'   # ST_NAMES_V2: em-dash when we have no real name (avoid Ticker|Ticker repetition)
-    return _smart_case_company(nm)
+    """Final name shown to users.
 
+    A ticker with no universe entry renders as an em-dash. That is deliberate:
+    SediTracker's transactions table reaches back further than the universe
+    does, and a company that has left the universe (delisted, or screened out
+    as not-mining) keeps its filing history on the site without SediTracker
+    inventing a name for it.
+    """
+    nm = (raw_name or '').strip()
+    if not nm:
+        return '—'
+    return _smart_case_company(nm)
 
 
 # ===================== Column sorting (D20) ==================================
 # /* ST_SORT_V1 (2026-09-04) */
 # Sorting happens in Python, after the rows are fetched and decorated, for three
-# reasons: `company_name` is computed here from tickers.json and does not exist as
-# a SQL column at all; no user input ever reaches a query, so there is no injection
-# surface (cf. B25); and one code path serves all three pages. Row counts are small
-# (1.4k / 1.0k / 6.5k) so the sort itself costs well under a millisecond.
+# reasons: `company_name` is computed here from the universe and does not exist
+# as a SQL column at all; no user input ever reaches a query, so there is no
+# injection surface (cf. B25); and one code path serves all three pages. Row
+# counts are small (1.4k / 1.0k / 6.5k) so the sort itself costs well under a
+# millisecond.
 #
 # The sort spans the WHOLE result set for the page, not just the rows displayed —
 # "top by Value" means the largest in the window, not the largest of an arbitrary
 # first slice. That was the explicit requirement.
 
-# key -> (row field, kind). kind drives both the comparison and the default direction.
 SORT_SPECS = {
     "home": {
         "default": ("date", "desc"),
@@ -201,7 +174,7 @@ SORT_SPECS = {
 # Text that renders as "no value". These sort last in BOTH directions — a blank is
 # not smaller than every number, it is absent, and flipping the direction should not
 # march a block of em-dashes to the top of the page.
-_EMPTY_TEXT = ("", "-", "\u2014")
+_EMPTY_TEXT = ("", "-", "—")
 
 
 def _is_missing(v, kind: str) -> bool:
@@ -495,7 +468,15 @@ def healthz():
     con = get_conn()
     n_txn = con.execute("SELECT COUNT(*) FROM transactions").fetchone()[0]
     n_tkr = con.execute("SELECT COUNT(DISTINCT ticker) FROM transactions").fetchone()[0]
-    return {"ok": True, "transactions": n_txn, "tickers_covered": n_tkr}
+    # UNIVERSE_CLIENT_V1: surfaced here so a silent fallback to a stale cache is
+    # visible to monitoring rather than only to the log.
+    return {
+        "ok": True,
+        "transactions": n_txn,
+        "tickers_covered": n_tkr,
+        "universe_companies": len(universe_client.load()),
+        "universe_stale": universe_client.is_stale(),
+    }
 
 
 # ===================== JSON API for MTP integration ============================
@@ -644,4 +625,3 @@ def api_healthz():
         "fetched_at":   datetime.utcnow().isoformat() + "Z",
     }
 # ============================================================
-
