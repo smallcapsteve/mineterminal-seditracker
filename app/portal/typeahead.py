@@ -174,11 +174,17 @@ def search(q: str, limit: int = 14) -> list[dict[str, str]]:
     in_hits.sort(key=lambda h: (h[0], h[1], h[2]))
 
     # Companies are what most of this traffic is looking for, but a box that
-    # says "insider name" must not spend every slot on tickers: up to six rows
-    # are held back for people whenever people matched.
-    in_slots = min(6, len(in_hits))
-    co_take = co_hits[: max(0, limit - in_slots)]
-    in_take = in_hits[: max(0, limit - len(co_take))]
+    # says "insider name" must not spend every slot on tickers. So: companies
+    # get first call on the rows, up to six of what is left goes to people.
+    #
+    # Reserving the people's rows FIRST is what the first cut did, and on a
+    # short list it gave people every row — /api/search?q=gold&limit=5 came back
+    # with five Goldsteins and no gold companies, because six reserved rows out
+    # of five left companies nothing. Companies are guaranteed four rows before
+    # anyone is held back.
+    co_reserved = min(len(co_hits), max(4, limit - 6))
+    in_take = in_hits[: min(6, max(0, limit - co_reserved))]
+    co_take = co_hits[: max(0, limit - len(in_take))]
 
     out: list[dict[str, str]] = []
     for _, _, _, row in co_take:
