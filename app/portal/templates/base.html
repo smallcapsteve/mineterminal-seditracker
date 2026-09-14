@@ -8,6 +8,9 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700;900&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/static/style.css?v=v32">
+  <!-- TYPEAHEAD_V1: the search dropdown only. The same file MNT loads — this
+       site's /static is a symlink to MNT's. -->
+  <link rel="stylesheet" href="/static/typeahead.css?v=v1">
   <link rel="icon" type="image/png" href="/static/mnt-logo.svg?v=v10">
   {% block head_extra %}{% endblock %}
 
@@ -208,8 +211,8 @@ body > .container, body > main, body > .wrap, body > #root, body > #app {
         <a href="/tickers" {% if page == 'tickers' %}class="active"{% endif %}>Tickers</a>
         <a href="/insiders" {% if page == 'insiders' %}class="active"{% endif %}>Insiders</a>
       </div>
-      <form class="primary-nav-search" method="get" action="/search">
-        <input type="search" name="q" placeholder="Insider name or ticker…" value="{{ q or '' }}">
+      <form class="primary-nav-search" method="get" action="/search" data-typeahead data-suggest="/api/search">
+        <input type="search" name="q" placeholder="Insider name or ticker…" value="{{ q or '' }}" autocomplete="off">
         <button type="submit">Search</button>
       </form>
     </div>
@@ -255,6 +258,10 @@ body > .container, body > main, body > .wrap, body > #root, body > #app {
 })();
 /* HEADER_DATE_TZ_V1_END */
 </script>
+
+<!-- TYPEAHEAD_V1: the dropdown under the search box. Deferred, and the form
+     works exactly as before if it never loads. -->
+<script src="/static/typeahead.js?v=v1" defer></script>
 
 </body>
 </html>
