@@ -35,7 +35,8 @@ from fastapi.responses import JSONResponse
 _TTL_S = 300
 
 _lock = threading.Lock()
-_state: dict[str, Any] = {"companies": [], "insiders": [], "built_at": 0.0}
+_state: dict[str, Any] = {"companies": [], "insiders": [], "built_at": 0.0,
+                          "refreshing": False}
 
 
 def _words(s: str) -> list[str]:
@@ -98,26 +99,40 @@ def _build() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     return companies, insiders
 
 
-def _index() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    now = time.monotonic()
-    with _lock:
-        cos, ins = _state["companies"], _state["insiders"]
-        fresh = (cos or ins) and (now - _state["built_at"]) < _TTL_S
-    if fresh:
-        return cos, ins
-
+def _refresh() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Rebuild and store. Returns whatever the index holds afterwards."""
     try:
-        built_cos, built_ins = _build()
+        built = _build()
     except Exception:
         # Stale answers beat empty ones: an out-of-date index still finds every
         # company that existed five minutes ago, a blank one looks broken.
-        return cos, ins
-
+        built = None
     with _lock:
-        _state["companies"] = built_cos
-        _state["insiders"] = built_ins
-        _state["built_at"] = now
-    return built_cos, built_ins
+        if built is not None:
+            _state["companies"], _state["insiders"] = built
+            _state["built_at"] = time.monotonic()
+        _state["refreshing"] = False
+        return _state["companies"], _state["insiders"]
+
+
+def _index() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Never makes a reader wait for a rebuild if there is anything to answer
+    with. Fresh: answer it. Stale: answer it anyway and rebuild behind them —
+    two group-by scans of 80,000 rows is not something to do while someone is
+    mid-word. Only a worker's very first call builds in line, and register()
+    has already started that in the background at import.
+    """
+    now = time.monotonic()
+    with _lock:
+        cos, ins = _state["companies"], _state["insiders"]
+        if (cos or ins) and (now - _state["built_at"]) < _TTL_S:
+            return cos, ins
+        if cos or ins:
+            if not _state["refreshing"]:
+                _state["refreshing"] = True
+                threading.Thread(target=_refresh, daemon=True).start()
+            return cos, ins
+    return _refresh()
 
 
 def _score_company(row: dict[str, Any], q: str) -> Optional[int]:
@@ -205,6 +220,10 @@ def search(q: str, limit: int = 14) -> list[dict[str, str]]:
 
 
 def register(app) -> None:
+    # Build both indexes at import, off the request path, so the first reader
+    # to type does not pay for the first scan.
+    threading.Thread(target=_index, daemon=True).start()
+
     @app.get("/api/search")
     def api_search(q: str = "", limit: int = 14):
         """Type-ahead for the nav search box. Same payload shape as MTP's."""
