@@ -574,12 +574,13 @@ def _row_to_mtp(r):
                        else  "sell" if ("sell" in tt or "disposition" in tt)
                        else  tx_type_raw),
         "notes":            d.get("notes"),
+        "post_balance":     d.get("post_balance"),   # ST_POST_BALANCE_V1: holding after the trade
     }
 
 
 _BASE_SQL = (
     "SELECT t.txn_id, t.ticker, t.txn_date, t.txn_type, t.shares, t.price, "
-    "       t.total_value, t.notes, i.name "
+    "       t.total_value, t.notes, i.name, t.post_balance "   # ST_POST_BALANCE_V1
     "FROM transactions t LEFT JOIN insiders i ON i.insider_id = t.insider_id "
 )
 
